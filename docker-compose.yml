@@ -1,0 +1,16 @@
+services:
+  judy:
+    build: .
+    container_name: judy_council
+    ports:
+      - "8000:8000"
+    environment:
+      - JUDY_DB_PATH=/data/judy.db
+    volumes:
+      - judy_data:/data
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+
+volumes:
+  judy_data:
