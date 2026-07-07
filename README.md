@@ -1,144 +1,100 @@
 # Judy Council
 
-Judy Council is a compact governance microservice for proposal review, reconciliation, and audit logging. It exposes a FastAPI interface, stores state in SQLite, and enforces a zero-trust write path: proposals can be judged anywhere, but only the council can approve the write.
+Judy Council is the governance service for inter-agent proposal evaluation and commit control. It runs as a gRPC service, enforces signed requests, applies council policy rules, and writes approved state changes to SQLite.
 
-## Architecture Overview
+## What It Does
 
-The service is divided into three trust zones:
+- Receives proposals from agent-zone services
+- Evaluates proposals through the council matrix
+- Returns `APPROVED`, `REJECTED`, or `PENDING_REVIEW`
+- Commits only approved mutations
+- Persists every decision to audit logs
 
-- **Agent Zone**: Sends proposal payloads and never writes directly to the database.
-- **Governance Zone**: Evaluates the proposal with council rules and returns an approved, rejected, or review verdict.
-- **Resource Zone**: Owns the SQLite database and persists only approved changes.
+## gRPC Contract
 
-```mermaid
-flowchart LR
-	A[Agent / UI] -->|JSON proposal| B[Judy Council API]
-	B -->|Verdict| A
-	B -->|Approved commit| C[(SQLite Database)]
-	B -->|Every outcome| D[(audit_logs)]
-	C --> E[local_backlog]
-```
+Service: `judy.JudyCouncil`
 
-## At a Glance
+- `Health(google.protobuf.Empty) -> google.protobuf.Struct`
+- `JudgeProposal(google.protobuf.Struct) -> google.protobuf.Struct`
+- `CommitProposal(google.protobuf.Struct) -> google.protobuf.Struct`
 
-- **Browser review console** with session-gated access for `DOOM` and `Nate`.
-- **Judge-by-default workflow** where every decision, annotation, and override is audited.
-- **Council votes visible in the UI**, including each judge’s verdict and the final council decision.
-- **Zero-trust override path** where DOOM acts as an AI auditor and still goes through the same decision matrix.
-- **Container-first development** with Docker Compose for build, test, and runtime parity.
+Shared schema: `proto/judy.proto`
 
-## How It Works
+## Security Model
 
-1. A proposal enters the council through the API.
-2. `app/governance.py` applies the policy matrix and returns a verdict.
-3. Approved mutations are committed through the resource zone.
-4. All outcomes are written to SQLite audit tables.
-5. Reviewers sign in through the UI, annotate decisions, or propose overrides.
-6. Override proposals are judged again, including those made by DOOM.
+- Request signature required by default (`JUDY_REQUIRE_SIGNATURE=true`)
+- Signature verified with HMAC SHA-256 (`X-Charon-Signature`)
+- Optional TLS server mode for gRPC (`JUDY_GRPC_TLS_ENABLED=true`)
+- Namespace-restricted ingress via Helm NetworkPolicy
 
-## Key Components
+## Data Stores
 
-- `app/main.py` exposes the API, login gate, browser review console, and review-action endpoints.
-- `app/governance.py` evaluates proposals against the council policy matrix.
-- `app/database.py` initializes SQLite, seeds a sample backlog row, and stores audit and review records.
-- `tests/test_api.py` verifies the gated UI, review actions, and council workflow end to end.
+SQLite tables initialized automatically at startup:
 
-## Data Model
+- `local_backlog`
+- `audit_logs`
+- `review_actions`
 
-The application creates these tables automatically on startup:
-
-- `local_backlog`: Active backlog records, completion data, and notes.
-- `audit_logs`: Every proposal, verdict, rationale, and council payload.
-- `review_actions`: Reviewer annotations and override attempts, including the judge votes used to clear them.
-
-## API Surface
-
-- `GET /login` opens the reviewer gate for the `DOOM` and `Nate` demo users.
-- `POST /login` starts a session for a valid reviewer.
-- `GET /review` opens the browser UI for reviewing decisions and individual judge votes.
-- `POST /review/annotate` stores annotations against a decision.
-- `POST /review/override` submits a decision override proposal.
-- `GET /review-actions` returns annotation and override records.
-- `GET /health` returns service status and record count.
-- `GET /backlog` lists backlog entities.
-- `GET /audit-logs` returns recent audit entries.
-- `GET /rules` exposes the active governance policy matrix.
-- `POST /proposals/judge` evaluates a proposal without mutating state.
-- `POST /proposals/commit` evaluates and commits only if the verdict is approved.
-
-## Local Setup
-
-### Build and Run
+## Local Run
 
 ```bash
 docker compose up --build -d
 ```
 
-### Open a Shell in the Container
+Judy listens on `localhost:50052`.
+
+## Tests
 
 ```bash
-docker compose exec judy bash
+docker compose run --rm --build judy pytest -q
 ```
-
-### Run Tests in Docker
-
-```bash
-docker compose run --rm --build judy pytest
-```
-
-### Shut It Down
-
-```bash
-docker compose down
-```
-
-### Open the Review Console
-
-Visit `http://localhost:8000/review` after the container starts.
-
-### Sign In
-
-Use the demo users `DOOM` or `Nate`.
-
-- `DOOM` passcode: `doom`
-- `Nate` passcode: `nate`
-
-Both users can annotate decisions and propose overrides. DOOM is modeled as an AI auditor, so DOOM-originated override proposals are reviewed by the same council rules before they are recorded.
 
 ## Configuration
 
-The service uses a single environment variable for the database location:
-
 ```env
 JUDY_DB_PATH=/data/judy.db
+GRPC_PORT=50052
+JUDY_REQUIRE_SIGNATURE=true
+CHARON_SIGNATURE_HEADER=X-Charon-Signature
+CHARON_SIGNATURE_SECRET=charon-dev-secret
+JUDY_GRPC_TLS_ENABLED=false
+JUDY_GRPC_TLS_CERT_PATH=/etc/judy/tls/tls.crt
+JUDY_GRPC_TLS_KEY_PATH=/etc/judy/tls/tls.key
 ```
 
-The default Docker Compose setup mounts a persistent volume at `/data`, so the database survives container restarts.
+## Kubernetes / Helm
+
+Helm chart path: `charts/judy`
+
+```bash
+helm upgrade --install judy charts/judy -n governance-zone --create-namespace
+```
+
+The chart includes:
+
+- Deployment
+- ServiceAccount
+- Service (gRPC)
+- Signature secret
+- Ingress NetworkPolicy from `agent-zone`
+- TLS-ready mount points for server certificates
 
 ## Repository Layout
 
 ```text
 JudgeJudy/
 ├── app/
-│   ├── database.py     # SQLite schema, seed data, and audit logging
-│   ├── governance.py   # Council rules and verdict generation
-│   └── main.py         # FastAPI application, login gate, and review console
+│   ├── grpc_server.py
+│   ├── database.py
+│   ├── governance.py
+│   └── signer.py
+├── proto/
+│   └── judy.proto
+├── charts/judy/
 ├── tests/
-│   └── test_api.py     # Container-friendly API tests
-├── Dockerfile          # Python runtime and app image
-├── docker-compose.yml  # Service definition and persistent volume
-├── requirements.txt    # API and test dependencies
-└── README.md           # Architecture and runbook
+│   └── test_api.py
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
 ```
-
-## Validation Status
-
-The Dockerized test suite passes with six tests covering the review gate, authenticated review console, council verdicts, approval flow, and DOOM override path.
-
-## Notes
-
-- The container includes `bash`, so you can inspect the running service interactively.
-- The application initializes the database automatically at import and on lifespan startup for predictable behavior under Docker and pytest.
-- The policy layer intentionally treats unsafe or malformed content as a hard stop before any write occurs.
-- The browser UI is session-gated and shows the current reviewer identity at the top of the review console.
-- The review console reads from the audit log, so every judgment shows both the final council decision and the individual judge votes.

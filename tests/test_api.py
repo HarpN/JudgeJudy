@@ -1,150 +1,134 @@
-from fastapi.testclient import TestClient
+from __future__ import annotations
 
-from app.main import app
+import grpc
+import pytest
+from google.protobuf import empty_pb2, json_format, struct_pb2
 
-client = TestClient(app)
+from app.grpc_server import create_server
+from app.signer import sign_payload
 
 
-def login(username: str = "Nate") -> None:
-    code = "nate" if username == "Nate" else "doom"
-    response = client.post(
-        "/login",
-        data={"username": username, "passcode": code},
-        follow_redirects=False,
+@pytest.fixture(scope="module")
+def channel() -> grpc.Channel:
+    server = create_server(bind_address="127.0.0.1:50062")
+    server.start()
+
+    grpc_channel = grpc.insecure_channel("127.0.0.1:50062")
+    grpc.channel_ready_future(grpc_channel).result(timeout=5)
+
+    yield grpc_channel
+
+    grpc_channel.close()
+    server.stop(None)
+
+
+def _health_call(channel: grpc.Channel):
+    return channel.unary_unary(
+        "/judy.JudyCouncil/Health",
+        request_serializer=empty_pb2.Empty.SerializeToString,
+        response_deserializer=struct_pb2.Struct.FromString,
     )
-    assert response.status_code in {303, 307}
 
 
-def test_review_gate_redirects_unauthenticated_users() -> None:
-    response = client.get("/review", follow_redirects=False)
-    assert response.status_code in {303, 307}
-    assert response.headers["location"] == "/login"
+def _judge_call(channel: grpc.Channel):
+    return channel.unary_unary(
+        "/judy.JudyCouncil/JudgeProposal",
+        request_serializer=struct_pb2.Struct.SerializeToString,
+        response_deserializer=struct_pb2.Struct.FromString,
+    )
 
 
-def test_health_endpoint() -> None:
-    response = client.get("/health")
-    assert response.status_code == 200
-    body = response.json()
+def _commit_call(channel: grpc.Channel):
+    return channel.unary_unary(
+        "/judy.JudyCouncil/CommitProposal",
+        request_serializer=struct_pb2.Struct.SerializeToString,
+        response_deserializer=struct_pb2.Struct.FromString,
+    )
+
+
+def _struct_payload(payload: dict) -> struct_pb2.Struct:
+    message = struct_pb2.Struct()
+    json_format.ParseDict(payload, message)
+    return message
+
+
+def _signed_metadata(payload: dict) -> tuple[tuple[str, str], ...]:
+    normalized = json_format.MessageToDict(_struct_payload(payload))
+    signature = sign_payload("charon-dev-secret", normalized)
+    return (("x-charon-signature", signature),)
+
+
+def test_health(channel: grpc.Channel) -> None:
+    response = _health_call(channel)(empty_pb2.Empty())
+    body = json_format.MessageToDict(response)
     assert body["status"] == "ok"
+    assert body["transport"] == "grpc"
 
 
-def test_judge_rejects_missing_entity() -> None:
-    response = client.post(
-        "/proposals/judge",
-        json={
-            "transaction_metadata": {
-                "agent_id": "backlog-assistant-v1",
-                "timestamp": "2026-07-06T21:54:13Z",
-                "correlation_id": "test-corr-001",
-            },
-            "proposed_action": {
-                "target_table": "local_backlog",
-                "action_type": "UPDATE_STATUS",
-                "entity_id": "missing-game",
-                "payload": {
-                    "status": "COMPLETED"
-                },
-            },
-            "agent_rationale": "Testing a rejection path.",
+def test_judge_rejects_missing_entity(channel: grpc.Channel) -> None:
+    payload = {
+        "transaction_metadata": {
+            "agent_id": "backlog-assistant-v1",
+            "timestamp": "2026-07-06T21:54:13Z",
+            "correlation_id": "test-corr-001",
         },
-    )
-    assert response.status_code == 200
-    body = response.json()
+        "proposed_action": {
+            "target_table": "local_backlog",
+            "action_type": "UPDATE_STATUS",
+            "entity_id": "missing-game",
+            "payload": {"status": "COMPLETED"},
+        },
+        "agent_rationale": "Testing a rejection path.",
+    }
+
+    response = _judge_call(channel)(_struct_payload(payload), metadata=_signed_metadata(payload))
+    body = json_format.MessageToDict(response)
     assert body["final_verdict"] == "REJECTED"
 
 
-def test_commit_approved_change_updates_entity() -> None:
-    response = client.post(
-        "/proposals/commit",
-        json={
-            "transaction_metadata": {
-                "agent_id": "backlog-assistant-v1",
-                "timestamp": "2026-07-06T21:54:13Z",
-                "correlation_id": "test-corr-002",
-            },
-            "proposed_action": {
-                "target_table": "local_backlog",
-                "action_type": "UPDATE_STATUS",
-                "entity_id": "game_105",
-                "payload": {
-                    "status": "ACTIVE",
-                    "completion": 82,
-                    "notes": "Updated by test suite."
-                },
-            },
-            "agent_rationale": "Testing a successful commit path.",
+def test_commit_approved_change_updates_entity(channel: grpc.Channel) -> None:
+    payload = {
+        "transaction_metadata": {
+            "agent_id": "backlog-assistant-v1",
+            "timestamp": "2026-07-06T21:54:13Z",
+            "correlation_id": "test-corr-002",
         },
-    )
-    assert response.status_code == 200
-    body = response.json()
+        "proposed_action": {
+            "target_table": "local_backlog",
+            "action_type": "UPDATE_STATUS",
+            "entity_id": "game_105",
+            "payload": {
+                "status": "ACTIVE",
+                "completion": 82,
+                "notes": "Updated by test suite.",
+            },
+        },
+        "agent_rationale": "Testing a successful commit path.",
+    }
+
+    response = _commit_call(channel)(_struct_payload(payload), metadata=_signed_metadata(payload))
+    body = json_format.MessageToDict(response)
     assert body["committed"] is True
-    assert body["entity"]["current_completion"] == 82
+    assert body["entity"]["current_completion"] == 82.0
 
 
-def test_review_console_shows_votes_and_verdict() -> None:
-    login("Nate")
-    correlation_id = "test-corr-003"
-    client.post(
-        "/proposals/judge",
-        json={
-            "transaction_metadata": {
-                "agent_id": "backlog-assistant-v1",
-                "timestamp": "2026-07-06T21:54:13Z",
-                "correlation_id": correlation_id,
-            },
-            "proposed_action": {
-                "target_table": "local_backlog",
-                "action_type": "UPDATE_STATUS",
-                "entity_id": "game_105",
-                "payload": {
-                    "status": "ACTIVE"
-                },
-            },
-            "agent_rationale": "Testing the review console.",
+def test_judge_requires_signature(channel: grpc.Channel) -> None:
+    payload = {
+        "transaction_metadata": {
+            "agent_id": "backlog-assistant-v1",
+            "timestamp": "2026-07-06T21:54:13Z",
+            "correlation_id": "test-corr-003",
         },
-    )
-
-    response = client.get("/review?verdict=all")
-    assert response.status_code == 200
-    assert "Judy Council Review Console" in response.text
-    assert "JUDY-SYNC" in response.text
-    assert correlation_id in response.text
-
-
-def test_doom_override_is_recorded_through_the_council() -> None:
-    login("DOOM")
-    judge_response = client.post(
-        "/proposals/judge",
-        json={
-            "transaction_metadata": {
-                "agent_id": "backlog-assistant-v1",
-                "timestamp": "2026-07-06T21:54:13Z",
-                "correlation_id": "test-corr-004",
-            },
-            "proposed_action": {
-                "target_table": "local_backlog",
-                "action_type": "UPDATE_STATUS",
-                "entity_id": "game_105",
-                "payload": {
-                    "status": "ACTIVE"
-                },
-            },
-            "agent_rationale": "Seed decision for the override flow.",
+        "proposed_action": {
+            "target_table": "local_backlog",
+            "action_type": "UPDATE_STATUS",
+            "entity_id": "game_105",
+            "payload": {"status": "ACTIVE"},
         },
-    )
-    council_id = judge_response.json()["council_id"]
+        "agent_rationale": "Unsigned proposal should fail.",
+    }
 
-    response = client.post(
-        "/review/override",
-        data={
-            "council_id": council_id,
-            "requested_verdict": "PENDING_REVIEW",
-            "note": "DOOM is auditing the council verdict.",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code in {303, 307}
+    with pytest.raises(grpc.RpcError) as exc:
+        _judge_call(channel)(_struct_payload(payload))
 
-    review_actions_response = client.get("/review-actions")
-    actions = review_actions_response.json()
-    assert any(action["actor_name"] == "DOOM" and action["target_council_id"] == council_id for action in actions)
+    assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED

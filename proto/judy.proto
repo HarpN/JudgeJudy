@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package judy;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+
+service JudyCouncil {
+  rpc Health(google.protobuf.Empty) returns (google.protobuf.Struct);
+  rpc JudgeProposal(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc CommitProposal(google.protobuf.Struct) returns (google.protobuf.Struct);
+}

@@ -3,9 +3,13 @@ services:
     build: .
     container_name: judy_council
     ports:
-      - "8000:8000"
+      - "50052:50052"
     environment:
       - JUDY_DB_PATH=/data/judy.db
+      - GRPC_PORT=50052
+      - JUDY_REQUIRE_SIGNATURE=true
+      - CHARON_SIGNATURE_HEADER=X-Charon-Signature
+      - CHARON_SIGNATURE_SECRET=charon-dev-secret
     volumes:
       - judy_data:/data
     tty: true

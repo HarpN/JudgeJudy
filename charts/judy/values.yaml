@@ -1,0 +1,39 @@
+replicaCount: 1
+
+image:
+  repository: judy-council
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 50052
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
+
+env:
+  JUDY_DB_PATH: /data/judy.db
+  GRPC_PORT: "50052"
+  JUDY_REQUIRE_SIGNATURE: "true"
+  CHARON_SIGNATURE_HEADER: X-Charon-Signature
+
+secretEnv:
+  CHARON_SIGNATURE_SECRET: charon-dev-secret
+
+tls:
+  enabled: false
+  serverSecretName: ""
+  certKey: tls.crt
+  keyKey: tls.key
+  mountPath: /etc/judy/tls
+
+networkPolicy:
+  enabled: true
+  allowedClientNamespace: agent-zone
+  allowedClientPodLabel: charon
