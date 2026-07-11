@@ -44,9 +44,12 @@ _SIGNATURE_SECRET = os.getenv("CHARON_SIGNATURE_SECRET", "charon-dev-secret")
 _REQUIRE_SIGNATURE = os.getenv("JUDY_REQUIRE_SIGNATURE", "true").lower() == "true"
 _HOST = os.getenv("HOST", "0.0.0.0")
 _GRPC_PORT = int(os.getenv("GRPC_PORT", "50052"))
+_GRPC_MAX_WORKERS = int(os.getenv("GRPC_MAX_WORKERS", "32"))
 _GRPC_TLS_ENABLED = os.getenv("JUDY_GRPC_TLS_ENABLED", "false").lower() == "true"
-_GRPC_TLS_CERT_PATH = os.getenv("JUDY_GRPC_TLS_CERT_PATH", "/etc/judy/tls/tls.crt")
-_GRPC_TLS_KEY_PATH = os.getenv("JUDY_GRPC_TLS_KEY_PATH", "/etc/judy/tls/tls.key")
+_GRPC_TLS_CERT_PATH = os.getenv("JUDY_GRPC_TLS_CERT_PATH", "/etc/judy/tls/server.crt")
+_GRPC_TLS_KEY_PATH = os.getenv("JUDY_GRPC_TLS_KEY_PATH", "/etc/judy/tls/server.key")
+_GRPC_TLS_REQUIRE_CLIENT_AUTH = os.getenv("JUDY_GRPC_TLS_REQUIRE_CLIENT_AUTH", "false").lower() == "true"
+_GRPC_TLS_CLIENT_CA_CERT_PATH = os.getenv("JUDY_GRPC_TLS_CLIENT_CA_CERT_PATH", "/etc/judy/ca/clients-ca.crt")
 
 
 def _dict_to_struct(payload: dict[str, Any]) -> struct_pb2.Struct:
@@ -175,7 +178,7 @@ def _commit_proposal(request_message: struct_pb2.Struct, context: grpc.ServicerC
 
 def create_server(bind_address: str | None = None) -> grpc.Server:
     init_db()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=_GRPC_MAX_WORKERS))
 
     handlers = {
         "Health": grpc.unary_unary_rpc_method_handler(
@@ -200,14 +203,34 @@ def create_server(bind_address: str | None = None) -> grpc.Server:
     listen_address = bind_address or f"{_HOST}:{_GRPC_PORT}"
 
     if _GRPC_TLS_ENABLED:
+        if not _GRPC_TLS_CERT_PATH or not _GRPC_TLS_KEY_PATH:
+            raise RuntimeError("JUDY_GRPC_TLS_CERT_PATH and JUDY_GRPC_TLS_KEY_PATH are required when TLS is enabled")
+
         with open(_GRPC_TLS_KEY_PATH, "rb") as key_file:
             private_key = key_file.read()
         with open(_GRPC_TLS_CERT_PATH, "rb") as cert_file:
             certificate_chain = cert_file.read()
-        credentials = grpc.ssl_server_credentials(((private_key, certificate_chain),))
-        server.add_secure_port(listen_address, credentials)
+
+        root_certificates = None
+        if _GRPC_TLS_REQUIRE_CLIENT_AUTH:
+            if not _GRPC_TLS_CLIENT_CA_CERT_PATH:
+                raise RuntimeError("JUDY_GRPC_TLS_CLIENT_CA_CERT_PATH is required when client auth is enabled")
+            with open(_GRPC_TLS_CLIENT_CA_CERT_PATH, "rb") as ca_file:
+                root_certificates = ca_file.read()
+
+        credentials = grpc.ssl_server_credentials(
+            ((private_key, certificate_chain),),
+            root_certificates=root_certificates,
+            require_client_auth=_GRPC_TLS_REQUIRE_CLIENT_AUTH,
+        )
+        bound_port = server.add_secure_port(listen_address, credentials)
     else:
-        server.add_insecure_port(listen_address)
+        bound_port = server.add_insecure_port(listen_address)
+
+    if not bound_port:
+        raise RuntimeError("Failed to bind Judy gRPC server")
+
+    server.bound_port = bound_port  # type: ignore[attr-defined]
 
     return server
 

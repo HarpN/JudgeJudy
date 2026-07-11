@@ -10,10 +10,10 @@ from app.signer import sign_payload
 
 @pytest.fixture(scope="module")
 def channel() -> grpc.Channel:
-    server = create_server(bind_address="127.0.0.1:50062")
+    server = create_server(bind_address="127.0.0.1:0")
     server.start()
 
-    grpc_channel = grpc.insecure_channel("127.0.0.1:50062")
+    grpc_channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
     grpc.channel_ready_future(grpc_channel).result(timeout=5)
 
     yield grpc_channel

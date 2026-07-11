@@ -7,9 +7,15 @@ services:
     environment:
       - JUDY_DB_PATH=/data/judy.db
       - GRPC_PORT=50052
+      - GRPC_MAX_WORKERS=32
       - JUDY_REQUIRE_SIGNATURE=true
       - CHARON_SIGNATURE_HEADER=X-Charon-Signature
       - CHARON_SIGNATURE_SECRET=charon-dev-secret
+      - JUDY_GRPC_TLS_ENABLED=false
+      - JUDY_GRPC_TLS_REQUIRE_CLIENT_AUTH=false
+      - JUDY_GRPC_TLS_CERT_PATH=/etc/judy/tls/server.crt
+      - JUDY_GRPC_TLS_KEY_PATH=/etc/judy/tls/server.key
+      - JUDY_GRPC_TLS_CLIENT_CA_CERT_PATH=/etc/judy/ca/clients-ca.crt
     volumes:
       - judy_data:/data
     tty: true
