@@ -4,3 +4,11 @@ __pycache__/
 .pytest_cache/
 .env
 venv/
+certs/**/*.crt
+certs/**/*.key
+certs/**/*.pem
+certs/**/*.csr
+certs/**/*.srl
+certs/**/*.cnf
+certs/tmp/
+!certs/README.md

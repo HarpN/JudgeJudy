@@ -25,6 +25,7 @@ Shared schema: `proto/judy.proto`
 - Request signature required by default (`JUDY_REQUIRE_SIGNATURE=true`)
 - Signature verified with HMAC SHA-256 (`X-Charon-Signature`)
 - Optional TLS server mode for gRPC (`JUDY_GRPC_TLS_ENABLED=true`)
+- Optional inbound mTLS client certificate enforcement (`JUDY_GRPC_TLS_REQUIRE_CLIENT_AUTH=true`)
 - Namespace-restricted ingress via Helm NetworkPolicy
 
 ## Data Stores
@@ -54,12 +55,41 @@ docker compose run --rm --build judy pytest -q
 ```env
 JUDY_DB_PATH=/data/judy.db
 GRPC_PORT=50052
+GRPC_MAX_WORKERS=32
 JUDY_REQUIRE_SIGNATURE=true
 CHARON_SIGNATURE_HEADER=X-Charon-Signature
 CHARON_SIGNATURE_SECRET=charon-dev-secret
 JUDY_GRPC_TLS_ENABLED=false
-JUDY_GRPC_TLS_CERT_PATH=/etc/judy/tls/tls.crt
-JUDY_GRPC_TLS_KEY_PATH=/etc/judy/tls/tls.key
+JUDY_GRPC_TLS_CERT_PATH=/etc/judy/tls/server.crt
+JUDY_GRPC_TLS_KEY_PATH=/etc/judy/tls/server.key
+JUDY_GRPC_TLS_REQUIRE_CLIENT_AUTH=false
+JUDY_GRPC_TLS_CLIENT_CA_CERT_PATH=/etc/judy/ca/clients-ca.crt
+```
+
+### Compose mTLS Profile
+
+Generate local dev certificates first:
+
+```powershell
+./scripts/generate-dev-certs.ps1 -Force
+```
+
+Run Judy with mTLS enabled:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mtls.yml up --build
+```
+
+Verify certificate chains and handshake:
+
+```powershell
+./scripts/verify-mtls.ps1
+```
+
+If Judy is not running, verify cert trust only:
+
+```powershell
+./scripts/verify-mtls.ps1 -SkipHandshake
 ```
 
 ## Kubernetes / Helm

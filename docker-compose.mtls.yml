@@ -1,0 +1,11 @@
+services:
+  judy:
+    environment:
+      - JUDY_GRPC_TLS_ENABLED=true
+      - JUDY_GRPC_TLS_REQUIRE_CLIENT_AUTH=true
+      - JUDY_GRPC_TLS_CERT_PATH=/etc/judy/tls/server.crt
+      - JUDY_GRPC_TLS_KEY_PATH=/etc/judy/tls/server.key
+      - JUDY_GRPC_TLS_CLIENT_CA_CERT_PATH=/etc/judy/ca/clients-ca.crt
+    volumes:
+      - ./certs/judy:/etc/judy/tls:ro
+      - ./certs/ca:/etc/judy/ca:ro
