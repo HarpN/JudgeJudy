@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from concurrent import futures
+from datetime import datetime, timezone
+from threading import Lock
 from typing import Any
 
 import grpc
@@ -50,6 +52,10 @@ _GRPC_TLS_CERT_PATH = os.getenv("JUDY_GRPC_TLS_CERT_PATH", "/etc/judy/tls/server
 _GRPC_TLS_KEY_PATH = os.getenv("JUDY_GRPC_TLS_KEY_PATH", "/etc/judy/tls/server.key")
 _GRPC_TLS_REQUIRE_CLIENT_AUTH = os.getenv("JUDY_GRPC_TLS_REQUIRE_CLIENT_AUTH", "false").lower() == "true"
 _GRPC_TLS_CLIENT_CA_CERT_PATH = os.getenv("JUDY_GRPC_TLS_CLIENT_CA_CERT_PATH", "/etc/judy/ca/clients-ca.crt")
+_REPLAY_TTL_SECONDS = int(os.getenv("JUDY_REPLAY_TTL_SECONDS", "300"))
+
+_seen_nonces: dict[str, datetime] = {}
+_nonce_lock = Lock()
 
 
 def _dict_to_struct(payload: dict[str, Any]) -> struct_pb2.Struct:
@@ -64,6 +70,61 @@ def _struct_to_dict(message: struct_pb2.Struct) -> dict[str, Any]:
 
 def _metadata_dict(context: grpc.ServicerContext) -> dict[str, str]:
     return {item.key.lower(): item.value for item in context.invocation_metadata()}
+
+
+def _parse_iso8601(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _validate_replay_envelope(envelope: dict[str, Any], context: grpc.ServicerContext) -> bool:
+    issued_at_raw = envelope.get("issued_at")
+    nonce = envelope.get("nonce")
+
+    if not issued_at_raw or not nonce:
+        context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+        context.set_details("Missing issued_at or nonce in signed envelope")
+        return False
+
+    try:
+        issued_at = _parse_iso8601(str(issued_at_raw))
+    except Exception:
+        context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+        context.set_details("Invalid issued_at in signed envelope")
+        return False
+
+    now = datetime.now(timezone.utc)
+    if abs((now - issued_at).total_seconds()) > _REPLAY_TTL_SECONDS:
+        context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+        context.set_details("Signed envelope is outside replay TTL window")
+        return False
+
+    with _nonce_lock:
+        # Drop stale nonces before evaluating the incoming nonce.
+        stale_cutoff = now.timestamp() - _REPLAY_TTL_SECONDS
+        stale = [key for key, seen_at in _seen_nonces.items() if seen_at.timestamp() < stale_cutoff]
+        for key in stale:
+            _seen_nonces.pop(key, None)
+
+        nonce_value = str(nonce)
+        if nonce_value in _seen_nonces:
+            context.set_code(grpc.StatusCode.UNAUTHENTICATED)
+            context.set_details("Replay detected for signed envelope nonce")
+            return False
+
+        _seen_nonces[nonce_value] = now
+
+    return True
+
+
+def _extract_proposal_payload(payload: dict[str, Any], context: grpc.ServicerContext) -> dict[str, Any] | None:
+    envelope_payload = payload.get("payload")
+    if not isinstance(envelope_payload, dict):
+        return payload
+
+    if not _validate_replay_envelope(payload, context):
+        return None
+
+    return envelope_payload
 
 
 def _ensure_signature(context: grpc.ServicerContext, payload: dict[str, Any]) -> bool:
@@ -118,8 +179,12 @@ def _judge_proposal(request_message: struct_pb2.Struct, context: grpc.ServicerCo
     if not _ensure_signature(context, payload):
         return struct_pb2.Struct()
 
+    proposal_payload = _extract_proposal_payload(payload, context)
+    if proposal_payload is None:
+        return struct_pb2.Struct()
+
     try:
-        request = ProposalRequest.model_validate(payload)
+        request = ProposalRequest.model_validate(proposal_payload)
     except Exception as exc:
         context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
         context.set_details(f"Invalid proposal: {exc}")
@@ -136,8 +201,12 @@ def _commit_proposal(request_message: struct_pb2.Struct, context: grpc.ServicerC
     if not _ensure_signature(context, payload):
         return struct_pb2.Struct()
 
+    proposal_payload = _extract_proposal_payload(payload, context)
+    if proposal_payload is None:
+        return struct_pb2.Struct()
+
     try:
-        request = ProposalRequest.model_validate(payload)
+        request = ProposalRequest.model_validate(proposal_payload)
     except Exception as exc:
         context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
         context.set_details(f"Invalid proposal: {exc}")

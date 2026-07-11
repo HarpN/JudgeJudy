@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import grpc
 import pytest
 from google.protobuf import empty_pb2, json_format, struct_pb2
@@ -56,6 +58,15 @@ def _signed_metadata(payload: dict) -> tuple[tuple[str, str], ...]:
     normalized = json_format.MessageToDict(_struct_payload(payload))
     signature = sign_payload("charon-dev-secret", normalized)
     return (("x-charon-signature", signature),)
+
+
+def _enveloped(payload: dict, nonce: str = "test-nonce-001") -> dict:
+    return {
+        "payload": payload,
+        "issued_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "nonce": nonce,
+        "key_id": "test-k1",
+    }
 
 
 def test_health(channel: grpc.Channel) -> None:
@@ -130,5 +141,52 @@ def test_judge_requires_signature(channel: grpc.Channel) -> None:
 
     with pytest.raises(grpc.RpcError) as exc:
         _judge_call(channel)(_struct_payload(payload))
+
+    assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
+def test_judge_accepts_signed_envelope(channel: grpc.Channel) -> None:
+    base_payload = {
+        "transaction_metadata": {
+            "agent_id": "backlog-assistant-v1",
+            "timestamp": "2026-07-10T12:00:00Z",
+            "correlation_id": "test-corr-010",
+        },
+        "proposed_action": {
+            "target_table": "local_backlog",
+            "action_type": "UPDATE_STATUS",
+            "entity_id": "game_105",
+            "payload": {"status": "ACTIVE"},
+        },
+        "agent_rationale": "Envelope compatibility check.",
+    }
+
+    envelope_payload = _enveloped(base_payload, nonce="test-nonce-accept")
+    response = _judge_call(channel)(_struct_payload(envelope_payload), metadata=_signed_metadata(envelope_payload))
+    body = json_format.MessageToDict(response)
+    assert body["final_verdict"] in {"APPROVED", "PENDING_REVIEW", "REJECTED"}
+
+
+def test_judge_rejects_replayed_nonce(channel: grpc.Channel) -> None:
+    base_payload = {
+        "transaction_metadata": {
+            "agent_id": "backlog-assistant-v1",
+            "timestamp": "2026-07-10T12:00:00Z",
+            "correlation_id": "test-corr-011",
+        },
+        "proposed_action": {
+            "target_table": "local_backlog",
+            "action_type": "UPDATE_STATUS",
+            "entity_id": "game_105",
+            "payload": {"status": "ACTIVE"},
+        },
+        "agent_rationale": "Replay detection check.",
+    }
+
+    envelope_payload = _enveloped(base_payload, nonce="test-nonce-replay")
+    _judge_call(channel)(_struct_payload(envelope_payload), metadata=_signed_metadata(envelope_payload))
+
+    with pytest.raises(grpc.RpcError) as exc:
+        _judge_call(channel)(_struct_payload(envelope_payload), metadata=_signed_metadata(envelope_payload))
 
     assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
