@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0.0",
+  "project": {
+    "name": "JudgeJudy",
+    "description": "Governance service for proposal judgment and commit control",
+    "default_branch": "main"
+  },
+  "runtime": {
+    "primary_mode": "docker_compose",
+    "grpc_port": 50052
+  },
+  "commands": {
+    "start": {
+      "shell": "powershell",
+      "cwd": ".",
+      "command": "docker compose up --build -d"
+    },
+    "stop": {
+      "shell": "powershell",
+      "cwd": ".",
+      "command": "docker compose down"
+    },
+    "test": {
+      "shell": "powershell",
+      "cwd": ".",
+      "command": "docker compose run --rm --build judy pytest -q"
+    }
+  },
+  "entrypoint_files": [
+    "README.md",
+    "app/grpc_server.py",
+    "app/governance.py",
+    "app/database.py",
+    "app/config.py",
+    "proto/judy.proto",
+    "docker-compose.yml"
+  ]
+}
